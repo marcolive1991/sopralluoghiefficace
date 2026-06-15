@@ -90,7 +90,12 @@ class OneDriveClient:
         }
 
     def _get(self, url: str, params: dict = None) -> dict:
-        r = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        # Passa i parametri OData direttamente nell'URL per evitare
+        # che requests codifichi il '$' come '%24' (non accettato da Graph API)
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{url}?{qs}"
+        r = requests.get(url, headers=self._headers(), timeout=30)
         r.raise_for_status()
         return r.json()
 
