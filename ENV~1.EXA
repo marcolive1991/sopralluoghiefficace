@@ -1,0 +1,10 @@
+# Token del bot Telegram (da @BotFather)
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+
+# App Azure AD (vedi istruzioni setup)
+MS_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+MS_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# Chat ID Telegram degli utenti autorizzati (separati da virgola)
+# Lascia vuoto per non limitare l'accesso
+ALLOWED_CHAT_IDS=123456789,987654321
