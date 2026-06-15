@@ -1,5 +1,5 @@
 """
-Bot Telegram per archiviazione foto sopralluoghi - Efficace Impianti Srl
+Bot Telegram per archiviazione foto e video sopralluoghi - Efficace Impianti Srl
 """
 
 import os
@@ -51,13 +51,25 @@ STATE_WAITING_CATEGORY  = "waiting_category"
 STATE_WAITING_SUBFOLDER = "waiting_subfolder"
 STATE_WAITING_CAPTION   = "waiting_caption"
 
-# Buffer: lista di dict {"file_id": str, "is_doc": bool}
+# Buffer: lista di dict {"file_id": str, "is_doc": bool, "mime": str}
 photo_buffers   = {}
 media_timers    = {}
 user_states     = {}
 user_data_store = {}
 
 onedrive = OneDriveClient()
+
+# MIME type → estensione file
+MIME_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png":  ".png",
+    "image/heic": ".heic",
+    "image/heif": ".heic",
+    "video/mp4":        ".mp4",
+    "video/quicktime":  ".mov",
+    "video/x-msvideo":  ".avi",
+    "video/3gpp":       ".3gp",
+}
 
 
 def get_state(chat_id):
@@ -88,29 +100,32 @@ def sanitize(text):
     return safe.strip().replace(" ", "_")
 
 def exif_date(image_bytes):
-    """Estrae la data di scatto dai dati EXIF. Restituisce None se non disponibile."""
+    """Estrae la data di scatto dai dati EXIF (solo per immagini JPEG originali)."""
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        exif = img._getexif()
-        if exif:
-            # Tag 36867 = DateTimeOriginal, 36868 = DateTimeDigitized, 306 = DateTime
-            for tag_id in (36867, 36868, 306):
-                value = exif.get(tag_id)
-                if value:
-                    dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                    return dt.strftime("%Y-%m-%d")
-    except Exception:
-        pass
+        exif = img.getexif()
+        if not exif:
+            exif = img._getexif() or {}
+        logger.info("EXIF tags trovati: " + str(list(exif.keys()) if exif else "nessuno"))
+        for tag_id in (36867, 36868, 306):
+            value = exif.get(tag_id)
+            if value:
+                logger.info("Data EXIF (tag " + str(tag_id) + "): " + str(value))
+                dt = datetime.strptime(str(value).strip(), "%Y:%m:%d %H:%M:%S")
+                return dt.strftime("%Y-%m-%d")
+        logger.info("Nessuna data EXIF trovata nei tag standard")
+    except Exception as exc:
+        logger.warning("Errore lettura EXIF: " + str(exc))
     return None
 
 
 async def cmd_start(update, context):
     await update.message.reply_text(
         "Bot Sopralluoghi - Efficace Impianti\n\n"
-        "Mandami le foto e le archivio su SharePoint.\n\n"
-        "Puoi inviare le immagini in due modi:\n"
-        "- Come FOTO (normale): usa la data di oggi come nome\n"
-        "- Come FILE: legge la data di scatto dai dati EXIF\n\n"
+        "Invia foto e video del sopralluogo e li archivio su SharePoint.\n\n"
+        "Modalita di invio:\n"
+        "- Come FOTO/VIDEO: Telegram li comprime, usa la data di oggi\n"
+        "- Come FILE: invia l'originale; per le foto legge la data EXIF\n\n"
         "Prima di iniziare: /auth per collegare il tuo account Microsoft.\n"
         "Per interrompere: /annulla"
     )
@@ -135,7 +150,7 @@ async def _poll_auth(update, flow):
     try:
         success = await asyncio.to_thread(onedrive.acquire_token_by_device_flow, flow)
         if success:
-            await update.message.reply_text("Account Microsoft collegato! Ora puoi mandarmi le foto.")
+            await update.message.reply_text("Account Microsoft collegato! Ora puoi mandarmi foto e video.")
         else:
             await update.message.reply_text("Autenticazione fallita o scaduta. Riprova con /auth")
     except Exception as exc:
@@ -148,47 +163,58 @@ async def cmd_annulla(update, context):
 
 
 # ---------------------------------------------------------------------------
-# Ricezione immagini (foto compressa o file originale)
+# Ricezione file
 # ---------------------------------------------------------------------------
 
-async def _add_to_buffer(chat_id, file_id, is_doc, update):
-    """Aggiunge un file al buffer e (ri)avvia il timer per il flusso categoria."""
+async def _add_to_buffer(chat_id, file_id, is_doc, mime, update):
     photo_buffers.setdefault(chat_id, [])
-    photo_buffers[chat_id].append({"file_id": file_id, "is_doc": is_doc})
+    photo_buffers[chat_id].append({"file_id": file_id, "is_doc": is_doc, "mime": mime})
     old = media_timers.pop(chat_id, None)
     if old:
         old.cancel()
     media_timers[chat_id] = asyncio.create_task(_start_category_flow(update, chat_id, delay=1.5))
 
 async def handle_photo(update, context):
-    """Foto inviata come immagine (Telegram la comprime, niente EXIF)."""
+    """Foto inviata come immagine compressa."""
     if not await check_auth(update):
         return
     chat_id = update.effective_chat.id
     if get_state(chat_id) != STATE_IDLE:
-        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla per cancellarla.")
+        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla.")
         return
-    file_id = update.message.photo[-1].file_id
-    await _add_to_buffer(chat_id, file_id, is_doc=False, update=update)
+    await _add_to_buffer(chat_id, update.message.photo[-1].file_id, is_doc=False, mime="image/jpeg", update=update)
+
+async def handle_video(update, context):
+    """Video inviato come video compresso."""
+    if not await check_auth(update):
+        return
+    chat_id = update.effective_chat.id
+    if get_state(chat_id) != STATE_IDLE:
+        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla.")
+        return
+    await _add_to_buffer(chat_id, update.message.video.file_id, is_doc=False, mime="video/mp4", update=update)
 
 async def handle_document(update, context):
-    """Foto inviata come file (originale con EXIF)."""
+    """Foto o video inviati come file originale."""
     if not await check_auth(update):
         return
     chat_id = update.effective_chat.id
     doc = update.message.document
-    if not doc.mime_type or not doc.mime_type.startswith("image/"):
-        return  # ignora documenti non-immagine
-    if get_state(chat_id) != STATE_IDLE:
-        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla per cancellarla.")
+    mime = doc.mime_type or ""
+    if not (mime.startswith("image/") or mime.startswith("video/")):
         return
-    await _add_to_buffer(chat_id, doc.file_id, is_doc=True, update=update)
+    if get_state(chat_id) != STATE_IDLE:
+        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla.")
+        return
+    logger.info("Documento ricevuto: " + mime + " (" + str(doc.file_size) + " bytes)")
+    await _add_to_buffer(chat_id, doc.file_id, is_doc=True, mime=mime, update=update)
 
 async def _start_category_flow(update, chat_id, delay):
     await asyncio.sleep(delay)
-    n = len(photo_buffers.get(chat_id, []))
-    if n == 0:
+    items = photo_buffers.get(chat_id, [])
+    if not items:
         return
+    n = len(items)
     set_state(chat_id, STATE_WAITING_CATEGORY)
     keyboard = [
         [InlineKeyboardButton("Preventivo Privato",   callback_data="cat_preventivo")],
@@ -196,7 +222,7 @@ async def _start_category_flow(update, chat_id, delay):
         [InlineKeyboardButton("Appalto in Corso",     callback_data="cat_appalto")],
     ]
     await update.message.reply_text(
-        str(n) + " foto ricevute.\n\nChe tipo di sopralluogo?",
+        str(n) + " file ricevuti.\n\nChe tipo di sopralluogo?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -251,7 +277,7 @@ async def _on_subfolder_selected(query, chat_id):
     set_state(chat_id, STATE_WAITING_CAPTION)
     await query.edit_message_text(
         folder_name + "\n\n"
-        "Scrivi una didascalia per le foto\n"
+        "Scrivi una didascalia per i file\n"
         "Es: quadro elettrico, locale contatori, ingresso principale"
     )
 
@@ -278,12 +304,12 @@ async def handle_text(update, context):
     items       = photo_buffers.get(chat_id, [])
 
     if not items:
-        await update.message.reply_text("Nessuna foto da caricare. Riprova.")
+        await update.message.reply_text("Nessun file da caricare. Riprova.")
         clear_session(chat_id)
         return
 
     total = len(items)
-    await update.message.reply_text("Carico " + str(total) + " foto su SharePoint...")
+    await update.message.reply_text("Carico " + str(total) + " file su SharePoint...")
 
     try:
         foto_folder_id = await asyncio.to_thread(onedrive.get_or_create_foto_folder, drive_id, folder_id)
@@ -299,35 +325,35 @@ async def handle_text(update, context):
         try:
             tg_file    = await context.bot.get_file(item["file_id"])
             file_bytes = bytes(await tg_file.download_as_bytearray())
+            mime       = item["mime"]
+            ext        = MIME_EXT.get(mime, ".jpg" if mime.startswith("image/") else ".mp4")
 
-            # Data di scatto da EXIF (solo per file originali)
+            # Data EXIF solo per immagini originali
             date_str = today_str
-            if item["is_doc"]:
-                exif_d = exif_date(file_bytes)
-                if exif_d:
-                    date_str = exif_d
+            if item["is_doc"] and mime.startswith("image/"):
+                date_str = exif_date(file_bytes) or today_str
 
             filename = (
-                date_str + "_" + safe_caption + ".jpg"
+                date_str + "_" + safe_caption + ext
                 if total == 1
-                else date_str + "_" + safe_caption + "_" + str(i).zfill(2) + ".jpg"
+                else date_str + "_" + safe_caption + "_" + str(i).zfill(2) + ext
             )
-            await asyncio.to_thread(onedrive.upload_file, drive_id, foto_folder_id, filename, file_bytes)
+            await asyncio.to_thread(onedrive.upload_file, drive_id, foto_folder_id, filename, file_bytes, mime)
             uploaded += 1
         except Exception as exc:
-            logger.error("Errore upload foto " + str(i) + "/" + str(total) + ": " + str(exc))
+            logger.error("Errore upload file " + str(i) + "/" + str(total) + ": " + str(exc))
             errors += 1
 
     clear_session(chat_id)
 
     icon = "OK" if errors == 0 else "ATTENZIONE"
     msg = (
-        icon + " " + str(uploaded) + "/" + str(total) + " foto caricate\n\n"
+        icon + " " + str(uploaded) + "/" + str(total) + " file caricati\n\n"
         "Cartella: " + folder_name + "/FOTO/\n"
-        "Nome: " + today_str + "_" + safe_caption + "_XX.jpg"
+        "Nome: " + today_str + "_" + safe_caption + "_XX"
     )
     if errors:
-        msg += "\n\n" + str(errors) + " foto non caricate per errore."
+        msg += "\n\n" + str(errors) + " file non caricati per errore."
     await update.message.reply_text(msg)
 
 
@@ -341,8 +367,10 @@ def main():
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("auth",    cmd_auth))
     app.add_handler(CommandHandler("annulla", cmd_annulla))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.PHOTO,          handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO,          handle_video))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
+    app.add_handler(MessageHandler(filters.Document.VIDEO, handle_document))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot avviato")

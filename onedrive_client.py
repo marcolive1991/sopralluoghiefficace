@@ -114,11 +114,11 @@ class OneDriveClient:
                 raise RuntimeError("Cartella FOTO non trovata.")
             raise
 
-    def upload_file(self, drive_id, folder_id, filename, content):
+    def upload_file(self, drive_id, folder_id, filename, content, content_type="image/jpeg"):
         url = (GRAPH_BASE + "/drives/" + drive_id
                + "/items/" + folder_id + ":/" + quote(filename) + ":/content")
-        headers = {**self._headers(), "Content-Type": "image/jpeg"}
-        r = requests.put(url, headers=headers, data=content, timeout=60)
+        headers = {**self._headers(), "Content-Type": content_type}
+        r = requests.put(url, headers=headers, data=content, timeout=120)
         r.raise_for_status()
         result = r.json()
         logger.info("Caricato: " + result.get("name", filename))
