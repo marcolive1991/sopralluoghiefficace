@@ -16,7 +16,7 @@ GRAPH_API = "https://graph.microsoft.com/v1.0"
 TOKEN_CACHE_FILE = "token_cache.json"
 
 # Scopes necessari per leggere/scrivere file su OneDrive for Business
-SCOPES = ["Files.ReadWrite", "offline_access"]
+SCOPES = ["Files.ReadWrite"]
 
 
 class OneDriveClient:
