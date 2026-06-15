@@ -1,6 +1,5 @@
 """
-Bot Telegram per archiviazione foto sopralluoghi su OneDrive
-Efficace Impianti Srl
+Bot Telegram per archiviazione foto sopralluoghi - Efficace Impianti Srl
 """
 
 import os
@@ -10,84 +9,64 @@ from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters, ContextTypes,
 )
 from onedrive_client import OneDriveClient
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configurazione categorie / percorsi OneDrive
-# ---------------------------------------------------------------------------
-CATEGORIES: dict = {
+DRIVE_GARE    = "b!1pSdbxvScUKQu-3NepOh_krK3H-eReFDj-YualkN1p4c4BLfWmEwSKzK9MSg7lnS"
+DRIVE_APPALTI = "b!1pSdbxvScUKQu-3NepOh_krK3H-eReFDj-YualkN1p67T48VA0_YRLZ2nDJQpml_"
+
+CATEGORIES = {
     "preventivo": {
-        "label": "📋 Preventivo Privato",
-        "path": "Gare/005. PREVENTIVI LAVORI PRIVATI",
+        "label": "Preventivo Privato",
+        "drive_id": DRIVE_GARE,
+        "subfolder": "005. PREVENTIVI LAVORI PRIVATI",
     },
     "gara": {
-        "label": "🏆 Gara in Preparazione",
-        "path": "Gare/004. GARE IN PREPARAZIONE",
+        "label": "Gara in Preparazione",
+        "drive_id": DRIVE_GARE,
+        "subfolder": "004. GARE IN PREPARAZIONE",
     },
     "appalto": {
-        "label": "🔧 Appalto in Corso",
-        "path": "Appalti in Corso",
+        "label": "Appalto in Corso",
+        "drive_id": DRIVE_APPALTI,
+        "subfolder": None,
     },
 }
 
-# ---------------------------------------------------------------------------
-# Utenti autorizzati (chat ID separati da virgola in ALLOWED_CHAT_IDS)
-# Se non impostato, chiunque può usare il bot.
-# ---------------------------------------------------------------------------
 _raw = os.environ.get("ALLOWED_CHAT_IDS", "")
-ALLOWED_IDS: set = {int(x.strip()) for x in _raw.split(",") if x.strip()}
+ALLOWED_IDS = {int(x.strip()) for x in _raw.split(",") if x.strip()}
 
-# ---------------------------------------------------------------------------
-# Stati conversazione (per chat_id)
-# ---------------------------------------------------------------------------
-STATE_IDLE = "idle"
-STATE_WAITING_CATEGORY = "waiting_category"
+STATE_IDLE              = "idle"
+STATE_WAITING_CATEGORY  = "waiting_category"
 STATE_WAITING_SUBFOLDER = "waiting_subfolder"
-STATE_WAITING_CAPTION = "waiting_caption"
+STATE_WAITING_CAPTION   = "waiting_caption"
 
-# ---------------------------------------------------------------------------
-# Storage globale (sufficiente per uso mono/pochi utenti)
-# ---------------------------------------------------------------------------
-photo_buffers: dict = {}    # chat_id -> [file_id, ...]
-media_timers: dict = {}     # chat_id -> asyncio.Task
-user_states: dict = {}      # chat_id -> stato corrente
-user_data_store: dict = {}  # chat_id -> dati sessione
+photo_buffers   = {}
+media_timers    = {}
+user_states     = {}
+user_data_store = {}
 
 onedrive = OneDriveClient()
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 
-def get_state(chat_id: int) -> str:
+def get_state(chat_id):
     return user_states.get(chat_id, STATE_IDLE)
 
-
-def set_state(chat_id: int, state: str) -> None:
+def set_state(chat_id, state):
     user_states[chat_id] = state
 
-
-def get_udata(chat_id: int) -> dict:
+def get_udata(chat_id):
     return user_data_store.setdefault(chat_id, {})
 
-
-def clear_session(chat_id: int) -> None:
+def clear_session(chat_id):
     photo_buffers.pop(chat_id, None)
     user_states.pop(chat_id, None)
     user_data_store.pop(chat_id, None)
@@ -95,295 +74,206 @@ def clear_session(chat_id: int) -> None:
     if t:
         t.cancel()
 
-
-async def check_auth(update: Update) -> bool:
-    """Restituisce True se l'utente è autorizzato."""
+async def check_auth(update):
     if ALLOWED_IDS and update.effective_user.id not in ALLOWED_IDS:
-        await update.effective_message.reply_text("⛔ Non autorizzato.")
+        await update.effective_message.reply_text("Non autorizzato.")
         return False
     return True
 
-
-def sanitize(text: str) -> str:
-    """Rende il testo sicuro per un nome file."""
-    safe = "".join(c if c.isalnum() or c in " -_àèìòùáéíóú" else "" for c in text)
+def sanitize(text):
+    safe = "".join(c if c.isalnum() or c in " -_" else "" for c in text)
     return safe.strip().replace(" ", "_")
 
 
-# ---------------------------------------------------------------------------
-# Handlers comandi
-# ---------------------------------------------------------------------------
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_start(update, context):
     await update.message.reply_text(
-        "👷 *Bot Sopralluoghi – Efficace Impianti*\n\n"
-        "Mandami le foto e le archivio automaticamente su OneDrive.\n\n"
-        "Al primo utilizzo:\n"
-        "• /auth — collega il tuo account Microsoft\n\n"
-        "Durante l'uso:\n"
-        "• Manda le foto (anche più in una volta)\n"
-        "• /annulla — interrompi un'operazione in corso",
-        parse_mode="Markdown",
+        "Bot Sopralluoghi - Efficace Impianti\n\n"
+        "Mandami le foto e le archivio su SharePoint.\n\n"
+        "Prima di iniziare: /auth per collegare il tuo account Microsoft.\n"
+        "Per interrompere: /annulla"
     )
 
-
-async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_auth(update, context):
     if not await check_auth(update):
         return
     try:
         flow = onedrive.initiate_device_flow()
         await update.message.reply_text(
-            f"🔑 *Autenticazione Microsoft*\n\n"
-            f"1. Vai su: {flow['verification_uri']}\n"
-            f"2. Inserisci il codice: `{flow['user_code']}`\n\n"
-            "⏳ In attesa di conferma (max 15 minuti)...",
-            parse_mode="Markdown",
+            "Autenticazione Microsoft\n\n"
+            "1. Vai su: " + flow["verification_uri"] + "\n"
+            "2. Inserisci il codice: " + flow["user_code"] + "\n\n"
+            "In attesa di conferma (max 15 minuti)..."
         )
         asyncio.create_task(_poll_auth(update, flow))
     except Exception as exc:
         logger.exception("Errore avvio device flow")
-        await update.message.reply_text(f"❌ Errore: {exc}")
+        await update.message.reply_text("Errore: " + str(exc))
 
-
-async def _poll_auth(update: Update, flow: dict) -> None:
+async def _poll_auth(update, flow):
     try:
         success = await asyncio.to_thread(onedrive.acquire_token_by_device_flow, flow)
         if success:
-            await update.message.reply_text(
-                "✅ Account Microsoft collegato! Ora puoi mandarmi le foto."
-            )
+            await update.message.reply_text("Account Microsoft collegato! Ora puoi mandarmi le foto.")
         else:
-            await update.message.reply_text(
-                "❌ Autenticazione fallita o scaduta. Riprova con /auth"
-            )
+            await update.message.reply_text("Autenticazione fallita o scaduta. Riprova con /auth")
     except Exception as exc:
-        logger.exception("Errore durante poll auth")
-        await update.message.reply_text(f"❌ Errore autenticazione: {exc}")
+        logger.exception("Errore poll auth")
+        await update.message.reply_text("Errore autenticazione: " + str(exc))
 
-
-async def cmd_annulla(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_annulla(update, context):
     clear_session(update.effective_chat.id)
-    await update.message.reply_text("❌ Operazione annullata.")
+    await update.message.reply_text("Operazione annullata.")
 
 
-# ---------------------------------------------------------------------------
-# Ricezione foto
-# ---------------------------------------------------------------------------
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_photo(update, context):
     if not await check_auth(update):
         return
-
     chat_id = update.effective_chat.id
-
     if get_state(chat_id) != STATE_IDLE:
-        await update.message.reply_text(
-            "⚠️ C'è già un'operazione in corso. Usa /annulla per cancellarla."
-        )
+        await update.message.reply_text("C'e' gia' un'operazione in corso. Usa /annulla per cancellarla.")
         return
-
-    # Aggiungi foto al buffer (massima qualità = ultimo elemento)
     photo_buffers.setdefault(chat_id, [])
     photo_buffers[chat_id].append(update.message.photo[-1].file_id)
-
-    # Cancella timer precedente e avvia nuovo (aspetta eventuali foto album)
     old = media_timers.pop(chat_id, None)
     if old:
         old.cancel()
+    media_timers[chat_id] = asyncio.create_task(_start_category_flow(update, chat_id, delay=1.5))
 
-    media_timers[chat_id] = asyncio.create_task(
-        _start_category_flow(update, chat_id, delay=1.5)
-    )
-
-
-async def _start_category_flow(update: Update, chat_id: int, delay: float) -> None:
-    """Avvia il flusso dopo aver raccolto tutte le foto dell'album."""
+async def _start_category_flow(update, chat_id, delay):
     await asyncio.sleep(delay)
-
     n = len(photo_buffers.get(chat_id, []))
     if n == 0:
         return
-
     set_state(chat_id, STATE_WAITING_CATEGORY)
-
     keyboard = [
-        [InlineKeyboardButton(cat["label"], callback_data=f"cat_{key}")]
-        for key, cat in CATEGORIES.items()
+        [InlineKeyboardButton("Preventivo Privato",  callback_data="cat_preventivo")],
+        [InlineKeyboardButton("Gara in Preparazione", callback_data="cat_gara")],
+        [InlineKeyboardButton("Appalto in Corso",    callback_data="cat_appalto")],
     ]
     await update.message.reply_text(
-        f"📸 {n} {'foto ricevuta' if n == 1 else 'foto ricevute'}.\n\nChe tipo di sopralluogo?",
+        str(n) + " foto ricevute.\n\nChe tipo di sopralluogo?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-# ---------------------------------------------------------------------------
-# Callback tastiere inline
-# ---------------------------------------------------------------------------
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_callback(update, context):
     query = update.callback_query
     await query.answer()
-
     chat_id = update.effective_chat.id
-    data = query.data
-    state = get_state(chat_id)
-
+    data    = query.data
+    state   = get_state(chat_id)
     if data.startswith("cat_") and state == STATE_WAITING_CATEGORY:
         await _on_category_selected(query, chat_id)
     elif data.startswith("sf_") and state == STATE_WAITING_SUBFOLDER:
         await _on_subfolder_selected(query, chat_id)
 
-
-async def _on_category_selected(query, chat_id: int) -> None:
+async def _on_category_selected(query, chat_id):
     cat_key = query.data.replace("cat_", "")
-    udata = get_udata(chat_id)
-    udata["category_key"] = cat_key
-
-    await query.edit_message_text("⏳ Carico le cartelle…")
-
+    get_udata(chat_id)["category_key"] = cat_key
+    await query.edit_message_text("Carico le cartelle...")
     try:
-        path = CATEGORIES[cat_key]["path"]
-        subfolders = await asyncio.to_thread(onedrive.list_subfolders, path)
+        cat = CATEGORIES[cat_key]
+        subfolders = await asyncio.to_thread(onedrive.list_subfolders, cat["drive_id"], cat["subfolder"])
     except Exception as exc:
         logger.exception("Errore lista sottocartelle")
-        await query.edit_message_text(f"❌ Errore nel caricare le cartelle:\n{exc}")
+        await query.edit_message_text("Errore nel caricare le cartelle:\n" + str(exc))
         clear_session(chat_id)
         return
-
     if not subfolders:
         await query.edit_message_text(
-            f"⚠️ Nessuna cartella trovata in:\n`{CATEGORIES[cat_key]['path']}`\n\n"
-            "Crea prima la cartella del progetto su OneDrive.",
-            parse_mode="Markdown",
+            "Nessuna cartella trovata per " + CATEGORIES[cat_key]["label"] + ".\n"
+            "Crea prima la cartella del progetto su SharePoint."
         )
         clear_session(chat_id)
         return
-
-    udata["subfolders"] = {f["id"]: f["name"] for f in subfolders}
+    get_udata(chat_id)["subfolders"] = {f["id"]: f["name"] for f in subfolders}
     set_state(chat_id, STATE_WAITING_SUBFOLDER)
+    keyboard = [[InlineKeyboardButton(f["name"], callback_data="sf_" + f["id"])] for f in subfolders]
+    await query.edit_message_text("Seleziona il progetto:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    keyboard = [
-        [InlineKeyboardButton(f["name"], callback_data=f"sf_{f['id']}")]
-        for f in subfolders
-    ]
-    await query.edit_message_text(
-        "📁 Seleziona il progetto:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def _on_subfolder_selected(query, chat_id: int) -> None:
+async def _on_subfolder_selected(query, chat_id):
     folder_id = query.data.replace("sf_", "")
     udata = get_udata(chat_id)
     folder_name = udata["subfolders"].get(folder_id, folder_id)
-
-    udata["target_folder_id"] = folder_id
+    cat_key     = udata["category_key"]
+    udata["target_folder_id"]   = folder_id
     udata["target_folder_name"] = folder_name
+    udata["target_drive_id"]    = CATEGORIES[cat_key]["drive_id"]
     set_state(chat_id, STATE_WAITING_CAPTION)
-
     await query.edit_message_text(
-        f"📁 *{folder_name}*\n\n"
-        "✏️ Scrivi una didascalia per le foto\n"
-        "_Es: quadro elettrico, locale contatori, ingresso principale_",
-        parse_mode="Markdown",
+        folder_name + "\n\n"
+        "Scrivi una didascalia per le foto\n"
+        "Es: quadro elettrico, locale contatori, ingresso principale"
     )
 
 
-# ---------------------------------------------------------------------------
-# Ricezione didascalia e upload
-# ---------------------------------------------------------------------------
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update, context):
     chat_id = update.effective_chat.id
-
     if get_state(chat_id) != STATE_WAITING_CAPTION:
-        return  # testo ignorato negli altri stati
-
-    caption = update.message.text.strip()
+        return
+    caption      = update.message.text.strip()
     safe_caption = sanitize(caption)
     if not safe_caption:
-        await update.message.reply_text("⚠️ Didascalia non valida. Riprova con un testo diverso.")
+        await update.message.reply_text("Didascalia non valida. Riprova.")
         return
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    udata = get_udata(chat_id)
-    folder_id = udata["target_folder_id"]
+    date_str    = datetime.now().strftime("%Y-%m-%d")
+    udata       = get_udata(chat_id)
+    folder_id   = udata["target_folder_id"]
     folder_name = udata["target_folder_name"]
-    file_ids = photo_buffers.get(chat_id, [])
-
+    drive_id    = udata["target_drive_id"]
+    file_ids    = photo_buffers.get(chat_id, [])
     if not file_ids:
-        await update.message.reply_text("❌ Nessuna foto da caricare. Riprova mandando le foto.")
+        await update.message.reply_text("Nessuna foto da caricare. Riprova.")
         clear_session(chat_id)
         return
-
     total = len(file_ids)
-    await update.message.reply_text(f"⏳ Carico {total} foto su OneDrive…")
-
-    # Recupera o crea la cartella FOTO dentro la sottocartella scelta
+    await update.message.reply_text("Carico " + str(total) + " foto su SharePoint...")
     try:
-        foto_folder_id = await asyncio.to_thread(
-            onedrive.get_or_create_foto_folder, folder_id
-        )
+        foto_folder_id = await asyncio.to_thread(onedrive.get_or_create_foto_folder, drive_id, folder_id)
     except Exception as exc:
         logger.exception("Errore creazione cartella FOTO")
-        await update.message.reply_text(f"❌ Errore creazione cartella FOTO:\n{exc}")
+        await update.message.reply_text("Errore creazione cartella FOTO:\n" + str(exc))
         clear_session(chat_id)
         return
-
-    # Upload
     uploaded = 0
-    errors = 0
+    errors   = 0
     for i, file_id in enumerate(file_ids, 1):
         try:
-            tg_file = await context.bot.get_file(file_id)
+            tg_file    = await context.bot.get_file(file_id)
             file_bytes = bytes(await tg_file.download_as_bytearray())
-
-            filename = (
-                f"{date_str}_{safe_caption}.jpg"
+            filename   = (
+                date_str + "_" + safe_caption + ".jpg"
                 if total == 1
-                else f"{date_str}_{safe_caption}_{i:02d}.jpg"
+                else date_str + "_" + safe_caption + "_" + str(i).zfill(2) + ".jpg"
             )
-            await asyncio.to_thread(
-                onedrive.upload_file, foto_folder_id, filename, file_bytes
-            )
+            await asyncio.to_thread(onedrive.upload_file, drive_id, foto_folder_id, filename, file_bytes)
             uploaded += 1
         except Exception as exc:
-            logger.error(f"Errore upload foto {i}/{total}: {exc}")
+            logger.error("Errore upload foto " + str(i) + "/" + str(total) + ": " + str(exc))
             errors += 1
-
     clear_session(chat_id)
-
-    icon = "✅" if errors == 0 else "⚠️"
-    suffix = f"_{total:02d}" if total > 1 else ""
+    icon = "OK" if errors == 0 else "ATTENZIONE"
     msg = (
-        f"{icon} *{uploaded}/{total} foto caricate*\n\n"
-        f"📁 `{folder_name}/FOTO/`\n"
-        f"🏷️ `{date_str}_{safe_caption}{suffix}.jpg`"
+        icon + " " + str(uploaded) + "/" + str(total) + " foto caricate\n\n"
+        "Cartella: " + folder_name + "/FOTO/\n"
+        "Nome: " + date_str + "_" + safe_caption + "_XX.jpg"
     )
     if errors:
-        msg += f"\n\n❌ {errors} foto non caricate per errore."
+        msg += "\n\n" + str(errors) + " foto non caricate per errore."
+    await update.message.reply_text(msg)
 
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
+def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("auth", cmd_auth))
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("auth",    cmd_auth))
     app.add_handler(CommandHandler("annulla", cmd_annulla))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
     logger.info("Bot avviato")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
